@@ -31,11 +31,12 @@ class HackerNewsAdapter:
 
     def fetch(self) -> list[RawItem]:
         items: list[RawItem] = []
-        with httpx.Client(timeout=15) as client:
+        transport = httpx.HTTPTransport(retries=3)
+        with httpx.Client(transport=transport, timeout=15) as client:
             try:
                 ids = client.get(f"{API}/topstories.json").json()[: self.max_stories]
-            except Exception:
-                log.exception("hackernews: failed to list top stories")
+            except Exception as exc:
+                log.error("hackernews: failed to list top stories (%s) — skipping this source", exc)
                 return items
             for story_id in ids:
                 try:

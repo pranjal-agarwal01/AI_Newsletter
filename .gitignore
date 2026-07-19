@@ -1,5 +1,7 @@
 .env
 *.db
+# the newsletter DB is tracked: GitHub Actions commits it back after each run
+!newsletter.db
 out/
 __pycache__/
 *.pyc

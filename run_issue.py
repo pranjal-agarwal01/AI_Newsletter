@@ -39,6 +39,7 @@ def main() -> int:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
     sources = load_sources()
     profile = load_profile()

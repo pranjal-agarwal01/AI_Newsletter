@@ -32,10 +32,12 @@ class ArxivAdapter:
             "max_results": str(self.max_results),
         }
         try:
-            response = httpx.get(API, params=params, timeout=30, follow_redirects=True)
-            response.raise_for_status()
-        except Exception:
-            log.exception("arxiv: query failed")
+            transport = httpx.HTTPTransport(retries=3)
+            with httpx.Client(transport=transport, timeout=30, follow_redirects=True) as client:
+                response = client.get(API, params=params)
+                response.raise_for_status()
+        except Exception as exc:
+            log.error("arxiv: query failed (%s: %s) — skipping this source", type(exc).__name__, exc)
             return []
         parsed = feedparser.parse(response.text)
         items: list[RawItem] = []

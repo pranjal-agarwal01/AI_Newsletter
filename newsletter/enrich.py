@@ -14,13 +14,16 @@ log = logging.getLogger(__name__)
 
 MIN_TEXT_CHARS = 400   # articles with less stored text than this get enriched
 MAX_TEXT_CHARS = 8000  # cap stored text so the LLM prompt stays bounded
-FETCH_TIMEOUT = 15
+FETCH_TIMEOUT = httpx.Timeout(10, connect=5)  # fail fast when the network is down
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (personal newsletter bot; contact via profile)"}
 
 
 def enrich_articles(conn, articles: list[Article]) -> None:
-    with httpx.Client(timeout=FETCH_TIMEOUT, follow_redirects=True, headers=HEADERS) as client:
+    transport = httpx.HTTPTransport(retries=2)
+    with httpx.Client(
+        transport=transport, timeout=FETCH_TIMEOUT, follow_redirects=True, headers=HEADERS
+    ) as client:
         for article in articles:
             if len(article.raw_text) >= MIN_TEXT_CHARS:
                 continue

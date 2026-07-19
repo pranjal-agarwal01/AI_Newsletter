@@ -42,8 +42,9 @@ arxiv:
 freshness_hours: 36
 
 # Refuse to send a new issue if the previous one went out less than this many
-# hours ago (11 rather than 12 to tolerate scheduler jitter). --force overrides.
-min_hours_between_issues: 11
+# hours ago (4 tolerates jitter on the 3-issues-a-day schedule: 09/14/20 IST).
+# --force overrides.
+min_hours_between_issues: 4
 
 # Maximum candidates passed to Claude in one call
 max_candidates: 25

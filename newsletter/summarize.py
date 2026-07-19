@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 
 import httpx
 from pydantic import BaseModel, ValidationError
@@ -106,6 +107,45 @@ def _extract_json(text: str) -> dict:
     return json.loads(text[start : end + 1])
 
 
+def _post_with_retries(payload: dict, headers: dict) -> httpx.Response:
+    """POST to OpenRouter, retrying transient failures (DNS/connect/timeouts,
+    429 rate limits, 5xx) with backoff. Raises RuntimeError with a plain
+    message when all attempts fail — run_issue.py prints it as one line."""
+    backoffs = [2, 5]
+    last_note = ""
+    for attempt in range(len(backoffs) + 1):
+        try:
+            response = httpx.post(OPENROUTER_URL, json=payload, headers=headers, timeout=300)
+            if response.status_code == 429 or response.status_code >= 500:
+                last_note = f"HTTP {response.status_code}"
+                raise httpx.TransportError(last_note)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPStatusError as exc:
+            raise RuntimeError(
+                f"OpenRouter rejected the request (HTTP {exc.response.status_code}) — "
+                "check OPENROUTER_API_KEY and OPENROUTER_MODEL in .env."
+            ) from exc
+        except httpx.TransportError as exc:
+            last_note = last_note or f"{type(exc).__name__}: {exc}"
+            if attempt < len(backoffs):
+                wait = backoffs[attempt]
+                log.warning("openrouter: attempt %d failed (%s), retrying in %ds", attempt + 1, last_note, wait)
+                time.sleep(wait)
+                last_note = ""
+            else:
+                if "429" in str(exc):
+                    raise RuntimeError(
+                        "OpenRouter rate limit hit (HTTP 429) — the free tier allows a limited "
+                        "number of requests per day. Try again later or add credits."
+                    ) from exc
+                raise RuntimeError(
+                    f"Could not reach OpenRouter after {len(backoffs) + 1} attempts "
+                    f"({type(exc).__name__}) — check your internet connection and try again."
+                ) from exc
+    raise RuntimeError("unreachable")
+
+
 def _openrouter_digest(candidates: list[Article], profile: dict) -> tuple[Digest, dict]:
     api_key = os.environ["OPENROUTER_API_KEY"]
     model = active_model()
@@ -123,8 +163,7 @@ def _openrouter_digest(candidates: list[Article], profile: dict) -> tuple[Digest
     last_error: Exception | None = None
     usage = {"input_tokens": 0, "output_tokens": 0}
     for attempt in (1, 2):
-        response = httpx.post(OPENROUTER_URL, json=payload, headers=headers, timeout=300)
-        response.raise_for_status()
+        response = _post_with_retries(payload, headers)
         data = response.json()
         if "error" in data:
             raise RuntimeError(f"OpenRouter error: {data['error']}")

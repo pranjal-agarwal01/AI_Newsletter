@@ -94,8 +94,7 @@ def main() -> int:
 
     log.info("--- stage 5/6: compose ---")
     articles_by_id = {a.id: a for a in candidates}
-    model_label = "no-LLM test mode" if args.no_llm else active_model()
-    subject, html, text = compose(digest, articles_by_id, model_label)
+    subject, html, text = compose(digest, articles_by_id)
 
     log.info("--- stage 6/6: deliver ---")
     if args.dry_run:

@@ -15,13 +15,21 @@ _env = Environment(
     autoescape=select_autoescape(["html"]),
 )
 
+# Byline shown in the email footer — edit these four lines to rebrand the issue.
+AUTHOR = {
+    "name": "Pranjal Agarwal",
+    "tagline": "Automation & AI engineering",
+    "portfolio": "https://portfolio-tau-five-zmhn056mhc.vercel.app/",
+    "linkedin": "https://www.linkedin.com/in/pranjal-agarwal01",
+}
+
 
 def _domain(url: str) -> str:
     host = urlparse(url).netloc
     return host[4:] if host.startswith("www.") else host
 
 
-def compose(digest: Digest, articles_by_id: dict[int, Article], model: str) -> tuple[str, str, str]:
+def compose(digest: Digest, articles_by_id: dict[int, Article]) -> tuple[str, str, str]:
     """Returns (subject, html_body, text_body)."""
     issue_date = date.today().strftime("%A, %B %d, %Y")
     subject = f"⚡ Your AI digest — {date.today().strftime('%b %d')}"
@@ -41,7 +49,7 @@ def compose(digest: Digest, articles_by_id: dict[int, Article], model: str) -> t
         )
 
     html = _env.get_template("digest.html.j2").render(
-        subject=subject, issue_date=issue_date, intro=digest.intro, items=items, model=model
+        subject=subject, issue_date=issue_date, intro=digest.intro, items=items, author=AUTHOR
     )
 
     lines = [f"Your AI digest — {issue_date}", "", digest.intro, ""]
@@ -53,6 +61,12 @@ def compose(digest: Digest, articles_by_id: dict[int, Article], model: str) -> t
             f"   Full story: {item['url']}",
             "",
         ]
+    lines += [
+        "—",
+        f"Curated & built by {AUTHOR['name']} — {AUTHOR['tagline']}",
+        f"Portfolio: {AUTHOR['portfolio']}",
+        f"LinkedIn: {AUTHOR['linkedin']}",
+    ]
     text = "\n".join(lines)
 
     return subject, html, text

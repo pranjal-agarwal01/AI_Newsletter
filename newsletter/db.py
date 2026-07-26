@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlsplit, urlunsplit
 
 from .config import DB_PATH
 from .models import Article, RawItem
@@ -45,8 +46,15 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+def _normalize_url(url: str) -> str:
+    """Lowercase only scheme + host (case-insensitive by spec); keep path/query
+    case intact so /Case and /case stay distinct articles."""
+    parts = urlsplit(url.strip())
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, parts.fragment))
+
+
 def content_hash(item: RawItem) -> str:
-    return hashlib.sha256(item.url.strip().lower().encode("utf-8")).hexdigest()
+    return hashlib.sha256(_normalize_url(item.url).encode("utf-8")).hexdigest()
 
 
 def upsert_article(conn: sqlite3.Connection, item: RawItem) -> tuple[int, bool]:

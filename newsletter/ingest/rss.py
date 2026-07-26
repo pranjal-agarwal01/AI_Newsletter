@@ -6,9 +6,9 @@ silently returns 0 entries, which hid a DNS outage once. Never again.
 """
 from __future__ import annotations
 
+import calendar
 import logging
 import re
-import time
 from datetime import datetime, timezone
 
 import feedparser
@@ -33,7 +33,9 @@ def _entry_datetime(entry) -> datetime | None:
     parsed = entry.get("published_parsed") or entry.get("updated_parsed")
     if not parsed:
         return None
-    return datetime.fromtimestamp(time.mktime(parsed), tz=timezone.utc)
+    # feedparser's *_parsed struct_time is UTC — timegm reads it as UTC.
+    # time.mktime would read it as local time (5.5h off under Asia/Kolkata).
+    return datetime.fromtimestamp(calendar.timegm(parsed), tz=timezone.utc)
 
 
 class RssAdapter:

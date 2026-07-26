@@ -108,7 +108,7 @@ def main() -> int:
     issue_id = db.record_issue(
         conn,
         [item.article_id for item in digest.items],
-        active_model(),
+        usage.get("model", active_model()),
         usage["input_tokens"],
         usage["output_tokens"],
     )

@@ -2,8 +2,8 @@
 Abstracts come with the response, so these items need no later enrichment."""
 from __future__ import annotations
 
+import calendar
 import logging
-import time
 from datetime import datetime, timezone
 
 import feedparser
@@ -44,8 +44,9 @@ class ArxivAdapter:
         for entry in parsed.entries:
             published = None
             if entry.get("published_parsed"):
+                # struct_time is UTC; timegm reads it as UTC (mktime would shift it by local offset)
                 published = datetime.fromtimestamp(
-                    time.mktime(entry.published_parsed), tz=timezone.utc
+                    calendar.timegm(entry.published_parsed), tz=timezone.utc
                 )
             items.append(
                 RawItem(

@@ -22,6 +22,12 @@ log = logging.getLogger(__name__)
 
 ANTHROPIC_MODEL = "claude-sonnet-5"
 DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+# Tried in order if the primary free model is capacity-exhausted mid-run.
+# Override with OPENROUTER_FALLBACK_MODELS (comma-separated), or set it empty to disable.
+DEFAULT_FALLBACK_MODELS = [
+    "nvidia/nemotron-3-super-120b-a12b:free",
+    "nvidia/nemotron-3-nano-30b-a3b:free",
+]
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 EXCERPT_CHARS = 1500
 
@@ -107,78 +113,114 @@ def _extract_json(text: str) -> dict:
     return json.loads(text[start : end + 1])
 
 
-def _post_with_retries(payload: dict, headers: dict) -> httpx.Response:
-    """POST to OpenRouter, retrying transient failures (DNS/connect/timeouts,
-    429 rate limits, 5xx) with backoff. Raises RuntimeError with a plain
-    message when all attempts fail — run_issue.py prints it as one line."""
+class _Transient(Exception):
+    """Signals 'this model is temporarily unavailable, try the next one'."""
+
+
+_TRANSIENT_HINTS = ("exhaust", "rate", "overload", "capacity", "temporarily", "timeout", "unavailable", "try again")
+
+
+def _is_transient_error(err) -> bool:
+    """OpenRouter sometimes returns HTTP 200 with an error object whose `code`
+    is a 5xx/429 or whose message describes a capacity/rate problem."""
+    if isinstance(err, dict):
+        code = err.get("code")
+        if isinstance(code, int) and (code == 429 or code >= 500):
+            return True
+        msg = str(err.get("message", "")).lower()
+    else:
+        msg = str(err).lower()
+    return any(hint in msg for hint in _TRANSIENT_HINTS)
+
+
+def _fallback_models() -> list[str]:
+    raw = os.getenv("OPENROUTER_FALLBACK_MODELS")
+    if raw is not None:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    primary = active_model()
+    return [m for m in DEFAULT_FALLBACK_MODELS if m != primary]
+
+
+def _openrouter_try_model(model: str, messages: list, headers: dict) -> tuple[Digest, dict]:
+    """One model, with retry/backoff. Returns (Digest, usage) on success,
+    raises _Transient to move to the next model, or RuntimeError for a
+    permanent failure (bad key, bad request)."""
+    payload = {"model": model, "max_tokens": 8000, "messages": messages}
     backoffs = [2, 5]
-    last_note = ""
+    note = "unknown error"
     for attempt in range(len(backoffs) + 1):
         try:
             response = httpx.post(OPENROUTER_URL, json=payload, headers=headers, timeout=300)
-            if response.status_code == 429 or response.status_code >= 500:
-                last_note = f"HTTP {response.status_code}"
-                raise httpx.TransportError(last_note)
-            response.raise_for_status()
-            return response
-        except httpx.HTTPStatusError as exc:
-            raise RuntimeError(
-                f"OpenRouter rejected the request (HTTP {exc.response.status_code}) — "
-                "check OPENROUTER_API_KEY and OPENROUTER_MODEL in .env."
-            ) from exc
         except httpx.TransportError as exc:
-            last_note = last_note or f"{type(exc).__name__}: {exc}"
+            note = f"connection ({type(exc).__name__})"
             if attempt < len(backoffs):
-                wait = backoffs[attempt]
-                log.warning("openrouter: attempt %d failed (%s), retrying in %ds", attempt + 1, last_note, wait)
-                time.sleep(wait)
-                last_note = ""
-            else:
-                if "429" in str(exc):
-                    raise RuntimeError(
-                        "OpenRouter rate limit hit (HTTP 429) — the free tier allows a limited "
-                        "number of requests per day. Try again later or add credits."
-                    ) from exc
-                raise RuntimeError(
-                    f"Could not reach OpenRouter after {len(backoffs) + 1} attempts "
-                    f"({type(exc).__name__}) — check your internet connection and try again."
-                ) from exc
-    raise RuntimeError("unreachable")
+                time.sleep(backoffs[attempt]); continue
+            raise _Transient(note)
 
+        if response.status_code in (401, 403):
+            raise RuntimeError(
+                f"OpenRouter rejected the key (HTTP {response.status_code}) — check OPENROUTER_API_KEY in .env."
+            )
+        if response.status_code == 429 or response.status_code >= 500:
+            note = f"HTTP {response.status_code}"
+            if attempt < len(backoffs):
+                time.sleep(backoffs[attempt]); continue
+            raise _Transient(note)
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"OpenRouter rejected the request (HTTP {response.status_code}) — check OPENROUTER_MODEL in .env."
+            )
 
-def _openrouter_digest(candidates: list[Article], profile: dict) -> tuple[Digest, dict]:
-    api_key = os.environ["OPENROUTER_API_KEY"]
-    model = active_model()
-    system, user, _ = _prompts(candidates, profile)
-    payload = {
-        "model": model,
-        "max_tokens": 8000,
-        "messages": [
-            {"role": "system", "content": system + JSON_INSTRUCTIONS},
-            {"role": "user", "content": user},
-        ],
-    }
-    headers = {"Authorization": f"Bearer {api_key}"}
-
-    last_error: Exception | None = None
-    usage = {"input_tokens": 0, "output_tokens": 0}
-    for attempt in (1, 2):
-        response = _post_with_retries(payload, headers)
         data = response.json()
-        if "error" in data:
-            raise RuntimeError(f"OpenRouter error: {data['error']}")
+        err = data.get("error")
+        if err:
+            if _is_transient_error(err):
+                note = f"upstream: {str(err)[:70]}"
+                if attempt < len(backoffs):
+                    time.sleep(backoffs[attempt]); continue
+                raise _Transient(note)
+            raise RuntimeError(f"OpenRouter error: {err}")
+
         raw_usage = data.get("usage") or {}
         usage = {
             "input_tokens": raw_usage.get("prompt_tokens", 0),
             "output_tokens": raw_usage.get("completion_tokens", 0),
+            "model": model,
         }
-        content = data["choices"][0]["message"]["content"] or ""
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
         try:
             return Digest.model_validate(_extract_json(content)), usage
-        except (ValueError, ValidationError) as exc:
-            last_error = exc
-            log.warning("openrouter: attempt %d returned unparseable JSON, retrying", attempt)
-    raise RuntimeError(f"OpenRouter model {model} did not return valid digest JSON: {last_error}")
+        except (ValueError, ValidationError):
+            note = "unparseable JSON"
+            if attempt < len(backoffs):
+                time.sleep(backoffs[attempt]); continue
+            raise _Transient(note)
+    raise _Transient(note)
+
+
+def _openrouter_digest(candidates: list[Article], profile: dict) -> tuple[Digest, dict]:
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is not set in .env.")
+    system, user, _ = _prompts(candidates, profile)
+    messages = [
+        {"role": "system", "content": system + JSON_INSTRUCTIONS},
+        {"role": "user", "content": user},
+    ]
+    headers = {"Authorization": f"Bearer {api_key}"}
+
+    models = [active_model()] + _fallback_models()
+    last_note = ""
+    for model in models:
+        try:
+            return _openrouter_try_model(model, messages, headers)
+        except _Transient as exc:
+            last_note = f"{model} ({exc})"
+            log.warning("openrouter: %s unavailable, trying next model", last_note)
+    raise RuntimeError(
+        f"All OpenRouter models were unavailable — last: {last_note}. The free tier is likely "
+        "temporarily exhausted; the next scheduled run will retry."
+    )
 
 
 def _anthropic_digest(candidates: list[Article], profile: dict) -> tuple[Digest, dict]:
@@ -196,6 +238,7 @@ def _anthropic_digest(candidates: list[Article], profile: dict) -> tuple[Digest,
     usage = {
         "input_tokens": response.usage.input_tokens,
         "output_tokens": response.usage.output_tokens,
+        "model": ANTHROPIC_MODEL,
     }
     return response.parsed_output, usage
 
@@ -209,18 +252,33 @@ def write_digest(candidates: list[Article], profile: dict) -> tuple[Digest, dict
             "OPENROUTER_API_KEY (or ANTHROPIC_API_KEY). "
             "Or preview without a key: python run_issue.py --no-llm"
         )
+    if prov == "openrouter" and not os.getenv("OPENROUTER_API_KEY"):
+        raise RuntimeError("LLM_PROVIDER=openrouter but OPENROUTER_API_KEY is not set in .env.")
+    if prov == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
+        raise RuntimeError("LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set in .env.")
+
     if prov == "openrouter":
         digest, usage = _openrouter_digest(candidates, profile)
     else:
         digest, usage = _anthropic_digest(candidates, profile)
 
+    # Keep only valid, unique article IDs. The model occasionally repeats an id;
+    # a duplicate would hit the (issue_id, article_id) primary key and crash the
+    # run AFTER the email already went out — so dedupe here, before delivery.
     max_items = profile.get("digest_preferences", {}).get("max_items", 10)
     valid_ids = {a.id for a in candidates}
-    digest.items = [i for i in digest.items if i.article_id in valid_ids][:max_items]
+    seen: set[int] = set()
+    unique_items = []
+    for item in digest.items:
+        if item.article_id in valid_ids and item.article_id not in seen:
+            seen.add(item.article_id)
+            unique_items.append(item)
+    digest.items = unique_items[:max_items]
 
     log.info(
         "summarize: %s chose %d items (in=%d out=%d tokens)",
-        active_model(), len(digest.items), usage["input_tokens"], usage["output_tokens"],
+        usage.get("model", active_model()), len(digest.items),
+        usage["input_tokens"], usage["output_tokens"],
     )
     return digest, usage
 

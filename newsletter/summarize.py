@@ -64,8 +64,9 @@ def active_model() -> str:
 SYSTEM_PROMPT = """You are the editor of a personalized daily AI newsletter with exactly one subscriber, described in the profile below. Your job each day: from the candidate articles, choose the ones genuinely worth this subscriber's time and write the digest.
 
 Selection rules:
-- Pick at most {max_items} items; fewer is fine on a slow news day. Skip anything stale, hype-only, or irrelevant to the profile.
-- Prefer variety: not all papers, not all product launches.
+- Aim for a FULL digest of {max_items} items. Select the {max_items} most relevant candidates; only send fewer if there genuinely aren't that many with any relevance to the subscriber.
+- Include every item with real relevance to the subscriber's interests or goals. Only drop items that are exact duplicates of another selected item, or completely unrelated to the profile. When unsure, include it.
+- Prefer variety: mix product launches, tools, and research rather than all of one kind.
 - Order items by relevance to the subscriber, most relevant first.
 
 Writing rules:

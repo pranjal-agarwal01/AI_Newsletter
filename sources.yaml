@@ -38,13 +38,15 @@ arxiv:
   categories: [cs.AI, cs.CL, cs.LG]
   max_results: 40
 
-# Items older than this many hours are ignored during selection
-freshness_hours: 36
+# How far back to consider UNSENT articles as candidates. Wider = fuller digests,
+# because with 2 sends/day a short window is mostly already-sent articles and the
+# unsent pool per run is tiny. 72h surfaces the never-sent backlog without feeling stale.
+freshness_hours: 72
 
 # Refuse to send a new issue if the previous one went out less than this many
 # hours ago. The 2-a-day sends (10:00 and 22:00 IST) are 12h apart, so 8 blocks
 # any accidental double while leaving room for GitHub cron jitter. --force overrides.
 min_hours_between_issues: 8
 
-# Maximum candidates passed to Claude in one call
-max_candidates: 25
+# Maximum candidates passed to the model in one call
+max_candidates: 30

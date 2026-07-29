@@ -19,7 +19,7 @@ STOPWORDS = {
     "new", "best", "practices", "tools", "preparation",
 }
 
-MAX_PER_SOURCE = 8
+MAX_PER_SOURCE = 10
 
 
 def _profile_keywords(profile: dict) -> set[str]:

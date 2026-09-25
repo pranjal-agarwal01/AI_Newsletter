@@ -2,8 +2,9 @@ name: AI Newsletter
 
 on:
   schedule:
-    # 04:30 / 16:30 UTC = 10:00 / 22:00 IST — 2 issues a day (10 AM and 10 PM IST).
-    # GitHub cron is best-effort; runs can start a few minutes late.
+    # 04:30 / 16:30 UTC = 10:00 / 22:00 IST. GitHub's cron is best-effort and in
+    # practice starts these runs 2-5 hours late; for on-time delivery, trigger the
+    # workflow_dispatch below from an external scheduler (see README).
     - cron: "30 4,16 * * *"
   workflow_dispatch: {}
 
@@ -17,10 +18,11 @@ permissions:
 jobs:
   send:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -42,15 +44,32 @@ jobs:
           MAIL_UNSUBSCRIBE: ${{ secrets.MAIL_UNSUBSCRIBE }}
         run: python run_issue.py
 
+      # Runs even if the pipeline step failed: once an email is out, its record
+      # must reach the repo or the next run would resend the same stories.
+      # newsletter.db is binary, so `git pull --rebase` can't merge it — instead,
+      # re-apply this run's copy on top of the latest main and retry the push.
       - name: Save database back to the repo
+        if: always()
         run: |
           git config user.name "newsletter-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add newsletter.db
-          if git diff --cached --quiet; then
-            echo "No database changes to save."
-          else
-            git commit -m "chore: update newsletter.db [skip ci]"
-            git pull --rebase origin main
-            git push
-          fi
+          cp newsletter.db "$RUNNER_TEMP/newsletter.db"
+          for attempt in 1 2 3; do
+            git fetch --quiet origin main
+            git reset --quiet --hard origin/main
+            cp "$RUNNER_TEMP/newsletter.db" newsletter.db
+            git add newsletter.db
+            if git diff --cached --quiet; then
+              echo "No database changes to save."
+              exit 0
+            fi
+            git commit --quiet -m "chore: update newsletter.db [skip ci]"
+            if git push --quiet origin HEAD:main; then
+              echo "Database saved."
+              exit 0
+            fi
+            echo "Push rejected (attempt $attempt) — retrying on top of the latest main."
+            sleep $((attempt * 5))
+          done
+          echo "::error::Could not save newsletter.db — the next run may resend this issue's stories."
+          exit 1

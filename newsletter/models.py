@@ -1,7 +1,7 @@
 """Shared data shapes passed between pipeline stages."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 
 
@@ -14,7 +14,6 @@ class RawItem:
     url: str
     published_at: datetime | None = None
     raw_text: str = ""
-    extra: dict = field(default_factory=dict)
 
 
 @dataclass

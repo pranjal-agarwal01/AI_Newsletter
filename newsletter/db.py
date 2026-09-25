@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from .config import DB_PATH
@@ -39,8 +40,8 @@ CREATE TABLE IF NOT EXISTS issue_items (
 """
 
 
-def connect() -> sqlite3.Connection:
-    conn = sqlite3.connect(DB_PATH)
+def connect(path: Path = DB_PATH) -> sqlite3.Connection:
+    conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row
     conn.executescript(SCHEMA)
     return conn
@@ -57,14 +58,13 @@ def content_hash(item: RawItem) -> str:
     return hashlib.sha256(_normalize_url(item.url).encode("utf-8")).hexdigest()
 
 
-def upsert_article(conn: sqlite3.Connection, item: RawItem) -> tuple[int, bool]:
-    """Insert the item unless its hash exists. Returns (article_id, was_new)."""
+def upsert_article(conn: sqlite3.Connection, item: RawItem) -> bool:
+    """Insert the item unless its hash exists. Returns True if it was new."""
     h = content_hash(item)
-    row = conn.execute("SELECT id FROM articles WHERE content_hash = ?", (h,)).fetchone()
-    if row:
-        return row["id"], False
+    if conn.execute("SELECT 1 FROM articles WHERE content_hash = ?", (h,)).fetchone():
+        return False
     published = item.published_at.astimezone(timezone.utc).isoformat() if item.published_at else None
-    cur = conn.execute(
+    conn.execute(
         "INSERT INTO articles (source, title, url, published_at, raw_text, content_hash, fetched_at)"
         " VALUES (?, ?, ?, ?, ?, ?, ?)",
         (
@@ -78,7 +78,7 @@ def upsert_article(conn: sqlite3.Connection, item: RawItem) -> tuple[int, bool]:
         ),
     )
     conn.commit()
-    return cur.lastrowid, True
+    return True
 
 
 def set_raw_text(conn: sqlite3.Connection, article_id: int, text: str) -> None:
@@ -105,6 +105,35 @@ def unsent_recent_articles(conn: sqlite3.Connection, freshness_hours: int) -> li
         )
         for r in rows
     ]
+
+
+def recently_sent_titles(conn: sqlite3.Connection, days: int) -> list[str]:
+    """Titles of articles sent in the last `days` days — used to catch the same
+    story arriving again under a different URL (e.g. blog post + HN link)."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT a.title FROM issue_items ii
+        JOIN issues i ON i.id = ii.issue_id
+        JOIN articles a ON a.id = ii.article_id
+        WHERE i.sent_at >= ?
+        """,
+        (cutoff,),
+    ).fetchall()
+    return [r["title"] for r in rows]
+
+
+def prune_old_text(conn: sqlite3.Connection, days: int) -> None:
+    """Drop the stored body text of articles older than `days`. Old articles are
+    never candidates again, but their text made up most of the git-committed
+    database. Rows (title/URL/hash) stay so dedup keeps working."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    cleared = conn.execute(
+        "UPDATE articles SET raw_text = '' WHERE fetched_at < ? AND raw_text != ''", (cutoff,)
+    ).rowcount
+    conn.commit()
+    if cleared:
+        conn.execute("VACUUM")  # actually shrink the file; takes well under a second at this size
 
 
 def hours_since_last_issue(conn: sqlite3.Connection) -> float | None:

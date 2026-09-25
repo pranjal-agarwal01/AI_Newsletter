@@ -45,15 +45,6 @@ class RssAdapter:
         self.feeds = config.get("feeds", [])
         self.max_items_per_feed = config.get("max_items_per_feed", 15)
 
-    def _parse_feed(self, client: httpx.Client, url: str):
-        try:
-            response = client.get(url)
-            response.raise_for_status()
-            return feedparser.parse(response.content)
-        except Exception as exc:
-            log.warning("rss: httpx fetch failed (%s), trying feedparser directly: %s", exc, url)
-            return feedparser.parse(url)
-
     def fetch(self) -> list[RawItem]:
         items: list[RawItem] = []
         transport = httpx.HTTPTransport(retries=3)
@@ -63,7 +54,9 @@ class RssAdapter:
         ) as client:
             for feed in self.feeds:
                 try:
-                    parsed = self._parse_feed(client, feed["url"])
+                    response = client.get(feed["url"])
+                    response.raise_for_status()
+                    parsed = feedparser.parse(response.content)
                     entries = parsed.entries[: self.max_items_per_feed]
                     if not entries:
                         reason = getattr(parsed, "bozo_exception", None) or "feed returned no entries"
@@ -84,6 +77,6 @@ class RssAdapter:
                             )
                         )
                     log.info("rss: %s -> %d entries", feed["name"], len(entries))
-                except Exception:
-                    log.exception("rss: feed failed, skipping: %s", feed.get("url"))
+                except Exception as exc:
+                    log.warning("rss: %s failed, skipping (%s: %s)", feed.get("name"), type(exc).__name__, exc)
         return items

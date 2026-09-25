@@ -18,12 +18,19 @@
     "practical AI workflows for productivity and business automation",
     "open-source self-hostable AI tools"
   ],
+  "keywords": [
+    "n8n", "zapier", "make.com", "workflow", "automation", "no-code", "low-code",
+    "agent", "mcp", "api", "sdk", "llm", "openrouter", "claude", "gpt", "gemini",
+    "open-source", "open source", "open-weight", "self-hosted", "pricing", "free tier",
+    "launch", "integration", "webhook", "telegram", "python", "rag", "tool", "plugin", "cli"
+  ],
   "goals": [
     "Spot new AI tools and models early so my automations stay ahead of the curve",
     "Find concrete techniques and integrations I can plug into client or personal workflows",
     "Track the AI tooling landscape without reading 50 sites a day"
   ],
   "digest_preferences": {
+    "timezone": "Asia/Kolkata",
     "max_items": 10,
     "tone": "direct and practical, no hype",
     "depth": "focus on what I can build or automate with it; mention pricing/free tiers and integration options; skip heavy math"

@@ -1,8 +1,9 @@
 """Turns the structured digest into the final email bodies (HTML + plain text)."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -29,10 +30,19 @@ def _domain(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
-def compose(digest: Digest, articles_by_id: dict[int, Article]) -> tuple[str, str, str]:
+def _edition(now: datetime) -> tuple[datetime, str]:
+    """Label the issue in the reader's timezone. A run just after midnight is
+    still the previous day's evening issue (scheduled runs can start late)."""
+    if now.hour < 5:
+        return now - timedelta(days=1), "Evening"
+    return now, "Morning" if now.hour < 16 else "Evening"
+
+
+def compose(digest: Digest, articles_by_id: dict[int, Article], tz: str) -> tuple[str, str, str]:
     """Returns (subject, html_body, text_body)."""
-    issue_date = date.today().strftime("%A, %B %d, %Y")
-    subject = f"⚡ Your AI digest — {date.today().strftime('%b %d')}"
+    day, edition = _edition(datetime.now(ZoneInfo(tz)))
+    issue_date = day.strftime("%A, %B %d, %Y")
+    subject = f"⚡ Your AI digest — {day.strftime('%b %d')} · {edition}"
 
     items = []
     for entry in digest.items:
@@ -49,10 +59,11 @@ def compose(digest: Digest, articles_by_id: dict[int, Article]) -> tuple[str, st
         )
 
     html = _env.get_template("digest.html.j2").render(
-        subject=subject, issue_date=issue_date, intro=digest.intro, items=items, author=AUTHOR
+        subject=subject, issue_date=issue_date, edition=edition,
+        intro=digest.intro, items=items, author=AUTHOR,
     )
 
-    lines = [f"Your AI digest — {issue_date}", "", digest.intro, ""]
+    lines = [f"Your AI digest — {issue_date} ({edition} edition)", "", digest.intro, ""]
     for i, item in enumerate(items, start=1):
         lines += [
             f"{i}. {item['headline']} ({item['source']})",

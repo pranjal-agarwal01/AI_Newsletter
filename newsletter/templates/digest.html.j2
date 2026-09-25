@@ -6,6 +6,8 @@
   <title>{{ subject }}</title>
 </head>
 <body style="margin:0; padding:0; background-color:#eef1f5;">
+  <!-- inbox preview text: shown by Gmail/Outlook next to the subject, hidden in the email itself -->
+  <div style="display:none; max-height:0; overflow:hidden; mso-hide:all;">{{ intro }}{% for _ in range(60) %}&#847;&zwnj;&nbsp;{% endfor %}</div>
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#eef1f5;">
     <tr>
       <td align="center" style="padding:24px 12px;">
@@ -13,9 +15,9 @@
 
           <tr>
             <td style="background-color:#0b1220; border-radius:12px 12px 0 0; padding:28px 32px;">
-              <p style="margin:0; font-family:Arial,Helvetica,sans-serif; font-size:13px; font-weight:bold; color:#4fd1c5; letter-spacing:2px;">&#9889; YOUR AI DIGEST</p>
+              <p style="margin:0; font-family:Arial,Helvetica,sans-serif; font-size:13px; font-weight:bold; color:#4fd1c5; letter-spacing:2px;">&#9889; YOUR AI DIGEST &middot; {{ edition|upper }} EDITION</p>
               <h1 style="margin:8px 0 0; font-family:Arial,Helvetica,sans-serif; font-size:24px; font-weight:bold; color:#ffffff;">{{ issue_date }}</h1>
-              <p style="margin:6px 0 0; font-family:Arial,Helvetica,sans-serif; font-size:13px; color:#8b98ad;">{{ items|length }} stories &middot; picked for you, not for everyone</p>
+              <p style="margin:6px 0 0; font-family:Arial,Helvetica,sans-serif; font-size:13px; color:#8b98ad;">{{ items|length }} {{ "story" if items|length == 1 else "stories" }} &middot; picked for you, not for everyone</p>
             </td>
           </tr>
 

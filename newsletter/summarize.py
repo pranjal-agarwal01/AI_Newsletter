@@ -1,10 +1,8 @@
 """The single LLM call per issue: the model reads the subscriber profile plus the
 candidate articles, picks the most relevant ones, and writes the digest copy.
 
-Two providers, chosen automatically from whichever key .env contains
-(or forced with LLM_PROVIDER=openrouter|anthropic):
-- openrouter: any OpenAI-compatible model slug via OPENROUTER_MODEL
-- anthropic:  claude-sonnet-5 via the official SDK with structured outputs
+Runs on OpenRouter (any model slug via OPENROUTER_MODEL — Claude, GPT, and the
+free models all go through the same OpenAI-compatible endpoint).
 """
 from __future__ import annotations
 
@@ -20,16 +18,19 @@ from .models import Article
 
 log = logging.getLogger(__name__)
 
-ANTHROPIC_MODEL = "claude-sonnet-5"
-DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
-# Tried in order if the primary free model is capacity-exhausted mid-run.
-# Override with OPENROUTER_FALLBACK_MODELS (comma-separated), or set it empty to disable.
+DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+# Tried in order if the primary model is unavailable (capacity, rate limit, or
+# retired slug). Override with OPENROUTER_FALLBACK_MODELS (comma-separated),
+# or set it empty to disable.
 DEFAULT_FALLBACK_MODELS = [
     "nvidia/nemotron-3-super-120b-a12b:free",
-    "nvidia/nemotron-3-nano-30b-a3b:free",
+    "google/gemma-4-31b-it:free",
 ]
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 EXCERPT_CHARS = 1500
+# Reasoning models count their thinking in completion tokens; 8000 was
+# occasionally within a few hundred tokens of truncating the JSON.
+MAX_OUTPUT_TOKENS = 16000
 
 
 class DigestItem(BaseModel):
@@ -44,46 +45,36 @@ class Digest(BaseModel):
     items: list[DigestItem]
 
 
-def provider() -> str:
-    forced = os.getenv("LLM_PROVIDER", "").strip().lower()
-    if forced in ("anthropic", "openrouter"):
-        return forced
-    if os.getenv("ANTHROPIC_API_KEY"):
-        return "anthropic"
-    if os.getenv("OPENROUTER_API_KEY"):
-        return "openrouter"
-    return "none"
-
-
 def active_model() -> str:
-    if provider() == "anthropic":
-        return ANTHROPIC_MODEL
-    return os.getenv("OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL)
+    return os.getenv("OPENROUTER_MODEL") or DEFAULT_MODEL
 
 
-SYSTEM_PROMPT = """You are the editor of a personalized daily AI newsletter with exactly one subscriber, described in the profile below. Your job each day: from the candidate articles, choose the ones genuinely worth this subscriber's time and write the digest.
+SYSTEM_PROMPT = """You are the editor of a personalized AI newsletter with exactly one subscriber, described in the profile below. From the candidate articles, choose the ones genuinely worth this subscriber's time and write the digest.
 
 Selection rules:
-- Aim for a FULL digest of {max_items} items. Select the {max_items} most relevant candidates; only send fewer if there genuinely aren't that many with any relevance to the subscriber.
-- Include every item with real relevance to the subscriber's interests or goals. Only drop items that are exact duplicates of another selected item, or completely unrelated to the profile. When unsure, include it.
-- Prefer variety: mix product launches, tools, and research rather than all of one kind.
+- Aim for {max_items} items. Include every candidate this subscriber would plausibly want to know about — model launches and pricing, new tools and integrations, agent security incidents, practical techniques. Leave out items with no real connection to their interests or goals (general tech news, politics, research outside their stack) rather than padding the digest to reach {max_items}.
+- If several candidates cover the same news (e.g. a launch post and commentary on it), include only the most useful one.
+- Research papers (source "arXiv"): include at most 2, and only if they have a concrete takeaway the subscriber could apply. Never lead the issue with one.
+- Prefer variety: mix product launches, tools, and techniques rather than all of one kind.
 - Order items by relevance to the subscriber, most relevant first.
 
 Writing rules:
 - headline: rewrite plainly; no clickbait.
-- summary: 2-4 sentences at the depth matching the subscriber's experience level for that topic. Only state facts present in the article text.
-- why_it_matters: one sentence connecting the item to the subscriber's goals or stack.
-- intro: 1-2 sentences framing today's issue for this subscriber.
+- summary: 2-3 short sentences (about 60 words max) in plain language at the subscriber's experience level for that topic. No unexplained jargon. Only state facts present in the article text.
+- why_it_matters: one sentence connecting the item to the subscriber's goals or stack. Don't force a connection that isn't there.
+- intro: 1-2 sentences framing this issue for the subscriber.
 - Match the tone in digest_preferences.
 
 Subscriber profile:
-{profile}"""
-
-JSON_INSTRUCTIONS = """
+{profile}
 
 Respond with ONLY a JSON object, no markdown fences, no commentary, exactly this shape:
-{"intro": "...", "items": [{"article_id": 123, "headline": "...", "summary": "...", "why_it_matters": "..."}]}
+{{"intro": "...", "items": [{{"article_id": 123, "headline": "...", "summary": "...", "why_it_matters": "..."}}]}}
 article_id must be copied from the candidate list."""
+
+
+def max_items(profile: dict) -> int:
+    return profile.get("digest_preferences", {}).get("max_items", 10)
 
 
 def _candidate_block(article: Article) -> dict:
@@ -97,13 +88,12 @@ def _candidate_block(article: Article) -> dict:
     }
 
 
-def _prompts(candidates: list[Article], profile: dict) -> tuple[str, str, int]:
-    max_items = profile.get("digest_preferences", {}).get("max_items", 10)
-    system = SYSTEM_PROMPT.format(max_items=max_items, profile=json.dumps(profile, indent=2))
-    user = "Candidate articles for today's issue:\n\n" + json.dumps(
+def _messages(candidates: list[Article], profile: dict) -> list[dict]:
+    system = SYSTEM_PROMPT.format(max_items=max_items(profile), profile=json.dumps(profile, indent=2))
+    user = "Candidate articles for this issue:\n\n" + json.dumps(
         [_candidate_block(a) for a in candidates], indent=2
     )
-    return system, user, max_items
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
 def _extract_json(text: str) -> dict:
@@ -114,8 +104,8 @@ def _extract_json(text: str) -> dict:
     return json.loads(text[start : end + 1])
 
 
-class _Transient(Exception):
-    """Signals 'this model is temporarily unavailable, try the next one'."""
+class _Unavailable(Exception):
+    """Signals 'this model can't serve the request right now, try the next one'."""
 
 
 _TRANSIENT_HINTS = ("exhaust", "rate", "overload", "capacity", "temporarily", "timeout", "unavailable", "try again")
@@ -142,45 +132,43 @@ def _fallback_models() -> list[str]:
     return [m for m in DEFAULT_FALLBACK_MODELS if m != primary]
 
 
-def _openrouter_try_model(model: str, messages: list, headers: dict) -> tuple[Digest, dict]:
+def _try_model(model: str, messages: list, headers: dict) -> tuple[Digest, dict]:
     """One model, with retry/backoff. Returns (Digest, usage) on success,
-    raises _Transient to move to the next model, or RuntimeError for a
-    permanent failure (bad key, bad request)."""
-    payload = {"model": model, "max_tokens": 8000, "messages": messages}
+    raises _Unavailable to move to the next model, or RuntimeError for a
+    failure no other model can fix (bad key)."""
+    payload = {"model": model, "max_tokens": MAX_OUTPUT_TOKENS, "messages": messages}
     backoffs = [2, 5]
     note = "unknown error"
     for attempt in range(len(backoffs) + 1):
+        retry = attempt < len(backoffs)
         try:
             response = httpx.post(OPENROUTER_URL, json=payload, headers=headers, timeout=300)
         except httpx.TransportError as exc:
             note = f"connection ({type(exc).__name__})"
-            if attempt < len(backoffs):
+            if retry:
                 time.sleep(backoffs[attempt]); continue
-            raise _Transient(note)
+            raise _Unavailable(note)
 
         if response.status_code in (401, 403):
             raise RuntimeError(
-                f"OpenRouter rejected the key (HTTP {response.status_code}) — check OPENROUTER_API_KEY in .env."
+                f"OpenRouter rejected the key (HTTP {response.status_code}) — check OPENROUTER_API_KEY."
             )
         if response.status_code == 429 or response.status_code >= 500:
             note = f"HTTP {response.status_code}"
-            if attempt < len(backoffs):
+            if retry:
                 time.sleep(backoffs[attempt]); continue
-            raise _Transient(note)
+            raise _Unavailable(note)
         if response.status_code >= 400:
-            raise RuntimeError(
-                f"OpenRouter rejected the request (HTTP {response.status_code}) — check OPENROUTER_MODEL in .env."
-            )
+            # e.g. a retired free-model slug (404) — retrying won't help, but another model might
+            raise _Unavailable(f"HTTP {response.status_code}: {response.text[:120]}")
 
         data = response.json()
         err = data.get("error")
         if err:
-            if _is_transient_error(err):
-                note = f"upstream: {str(err)[:70]}"
-                if attempt < len(backoffs):
-                    time.sleep(backoffs[attempt]); continue
-                raise _Transient(note)
-            raise RuntimeError(f"OpenRouter error: {err}")
+            note = f"upstream: {str(err)[:70]}"
+            if retry and _is_transient_error(err):
+                time.sleep(backoffs[attempt]); continue
+            raise _Unavailable(note)
 
         raw_usage = data.get("usage") or {}
         usage = {
@@ -193,80 +181,41 @@ def _openrouter_try_model(model: str, messages: list, headers: dict) -> tuple[Di
             return Digest.model_validate(_extract_json(content)), usage
         except (ValueError, ValidationError):
             note = "unparseable JSON"
-            if attempt < len(backoffs):
+            if retry:
                 time.sleep(backoffs[attempt]); continue
-            raise _Transient(note)
-    raise _Transient(note)
-
-
-def _openrouter_digest(candidates: list[Article], profile: dict) -> tuple[Digest, dict]:
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        raise RuntimeError("OPENROUTER_API_KEY is not set in .env.")
-    system, user, _ = _prompts(candidates, profile)
-    messages = [
-        {"role": "system", "content": system + JSON_INSTRUCTIONS},
-        {"role": "user", "content": user},
-    ]
-    headers = {"Authorization": f"Bearer {api_key}"}
-
-    models = [active_model()] + _fallback_models()
-    last_note = ""
-    for model in models:
-        try:
-            return _openrouter_try_model(model, messages, headers)
-        except _Transient as exc:
-            last_note = f"{model} ({exc})"
-            log.warning("openrouter: %s unavailable, trying next model", last_note)
-    raise RuntimeError(
-        f"All OpenRouter models were unavailable — last: {last_note}. The free tier is likely "
-        "temporarily exhausted; the next scheduled run will retry."
-    )
-
-
-def _anthropic_digest(candidates: list[Article], profile: dict) -> tuple[Digest, dict]:
-    import anthropic
-
-    client = anthropic.Anthropic()
-    system, user, _ = _prompts(candidates, profile)
-    response = client.messages.parse(
-        model=ANTHROPIC_MODEL,
-        max_tokens=16000,
-        system=system,
-        messages=[{"role": "user", "content": user}],
-        output_format=Digest,
-    )
-    usage = {
-        "input_tokens": response.usage.input_tokens,
-        "output_tokens": response.usage.output_tokens,
-        "model": ANTHROPIC_MODEL,
-    }
-    return response.parsed_output, usage
+            raise _Unavailable(note)
+    raise _Unavailable(note)
 
 
 def write_digest(candidates: list[Article], profile: dict) -> tuple[Digest, dict]:
-    """Returns (digest, usage) where usage has input/output token counts."""
-    prov = provider()
-    if prov == "none":
+    """Returns (digest, usage) where usage has input/output token counts and the model used."""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
         raise RuntimeError(
-            "No LLM credentials found. Copy .env.example to .env and set "
-            "OPENROUTER_API_KEY (or ANTHROPIC_API_KEY). "
-            "Or preview without a key: python run_issue.py --no-llm"
+            "OPENROUTER_API_KEY is not set. Copy .env.example to .env and fill it in, "
+            "or preview without a key: python run_issue.py --no-llm"
         )
-    if prov == "openrouter" and not os.getenv("OPENROUTER_API_KEY"):
-        raise RuntimeError("LLM_PROVIDER=openrouter but OPENROUTER_API_KEY is not set in .env.")
-    if prov == "anthropic" and not os.getenv("ANTHROPIC_API_KEY"):
-        raise RuntimeError("LLM_PROVIDER=anthropic but ANTHROPIC_API_KEY is not set in .env.")
+    messages = _messages(candidates, profile)
+    headers = {"Authorization": f"Bearer {api_key}"}
 
-    if prov == "openrouter":
-        digest, usage = _openrouter_digest(candidates, profile)
-    else:
-        digest, usage = _anthropic_digest(candidates, profile)
+    digest = usage = None
+    last_note = ""
+    for model in [active_model()] + _fallback_models():
+        try:
+            digest, usage = _try_model(model, messages, headers)
+            break
+        except _Unavailable as exc:
+            last_note = f"{model} ({exc})"
+            log.warning("openrouter: %s unavailable, trying next model", last_note)
+    if digest is None:
+        raise RuntimeError(
+            f"All OpenRouter models were unavailable — last: {last_note}. The free tier is likely "
+            "temporarily exhausted; the next scheduled run will retry."
+        )
 
     # Keep only valid, unique article IDs. The model occasionally repeats an id;
     # a duplicate would hit the (issue_id, article_id) primary key and crash the
     # run AFTER the email already went out — so dedupe here, before delivery.
-    max_items = profile.get("digest_preferences", {}).get("max_items", 10)
     valid_ids = {a.id for a in candidates}
     seen: set[int] = set()
     unique_items = []
@@ -274,22 +223,20 @@ def write_digest(candidates: list[Article], profile: dict) -> tuple[Digest, dict
         if item.article_id in valid_ids and item.article_id not in seen:
             seen.add(item.article_id)
             unique_items.append(item)
-    digest.items = unique_items[:max_items]
+    digest.items = unique_items[: max_items(profile)]
 
     log.info(
         "summarize: %s chose %d items (in=%d out=%d tokens)",
-        usage.get("model", active_model()), len(digest.items),
-        usage["input_tokens"], usage["output_tokens"],
+        usage["model"], len(digest.items), usage["input_tokens"], usage["output_tokens"],
     )
     return digest, usage
 
 
 def stub_digest(candidates: list[Article], profile: dict) -> Digest:
-    """No-LLM digest for testing without an API key: top candidates as-is,
-    raw excerpts instead of written summaries."""
-    max_items = profile.get("digest_preferences", {}).get("max_items", 10)
+    """No-LLM digest for testing the pipeline and email layout without an API
+    call: top candidates as-is, raw excerpts instead of written summaries."""
     items = []
-    for article in candidates[:max_items]:
+    for article in candidates[: max_items(profile)]:
         excerpt = " ".join(article.raw_text.split())
         summary = excerpt[:300] + ("…" if len(excerpt) > 300 else "")
         items.append(
@@ -297,11 +244,11 @@ def stub_digest(candidates: list[Article], profile: dict) -> Digest:
                 article_id=article.id,
                 headline=article.title,
                 summary=summary or "No article text available.",
-                why_it_matters="(test mode — the LLM writes this line once your API key is set)",
+                why_it_matters="(test mode — the LLM writes this line in a real run)",
             )
         )
     return Digest(
         intro="Test issue: these articles were picked by the keyword filter alone, in filter order. "
-        "With an API key, the model chooses the best ones and writes real summaries.",
+        "In a real run, the model chooses the best ones and writes the summaries.",
         items=items,
     )

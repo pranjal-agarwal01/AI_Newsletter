@@ -1,8 +1,11 @@
-"""Phase-1 candidate selection: deterministic, cheap, no LLM.
+"""Candidate selection: deterministic, cheap, no LLM.
 Narrows all fresh unsent articles down to a bounded candidate list;
-Claude makes the final editorial pick in summarize.py.
+the model makes the final editorial pick in summarize.py.
 
-This module is the seam where the Phase-2 embedding-based ranking engine lands.
+1. Drop stories already sent (or queued twice) under a different URL, matched by title.
+2. Rank by the profile's keywords: a title hit is worth 3, a body hit 1.
+3. Take the top max_candidates, with a cap per source so one prolific
+   source (arXiv publishes hundreds of papers a day) can't crowd out the rest.
 """
 from __future__ import annotations
 
@@ -13,56 +16,65 @@ from .models import Article
 
 log = logging.getLogger(__name__)
 
-STOPWORDS = {
-    "and", "the", "for", "with", "that", "this", "from", "are", "was", "can",
-    "how", "what", "when", "your", "you", "not", "but", "all", "its", "own",
-    "new", "best", "practices", "tools", "preparation",
-}
 
-MAX_PER_SOURCE = 10
+def normalize_title(title: str) -> str:
+    """Lowercase alphanumerics only, so 'GPT‑5.6 is out!' == 'gpt-5.6 is out'."""
+    return " ".join(re.findall(r"[a-z0-9]+", title.lower()))
 
 
-def _profile_keywords(profile: dict) -> set[str]:
-    text = " ".join(
-        profile.get("interests", [])
-        + profile.get("tech_stack", [])
-        + [profile.get("target_role", "")]
-    ).lower()
-    words = re.findall(r"[a-z][a-z0-9+#-]{2,}", text)
-    return {w for w in words if w not in STOPWORDS}
+def _keyword_patterns(profile: dict) -> list[re.Pattern]:
+    return [
+        re.compile(rf"\b{re.escape(kw.strip().lower())}s?\b")  # s? also matches plurals
+        for kw in profile.get("keywords", [])
+        if kw.strip()
+    ]
 
 
-def _score(article: Article, keywords: set[str]) -> int:
+def _score(article: Article, patterns: list[re.Pattern]) -> int:
     title = article.title.lower()
     body = article.raw_text[:1000].lower()
     score = 0
-    for kw in keywords:
-        pattern = rf"\b{re.escape(kw)}\b"
-        if re.search(pattern, title):
+    for pattern in patterns:
+        if pattern.search(title):
             score += 3
-        elif re.search(pattern, body):
+        elif pattern.search(body):
             score += 1
     return score
 
 
-def select_candidates(articles: list[Article], profile: dict, max_candidates: int) -> list[Article]:
-    keywords = _profile_keywords(profile)
-    scored = sorted(
+def select_candidates(
+    articles: list[Article],
+    profile: dict,
+    sent_titles: list[str],
+    max_candidates: int,
+    max_per_source: int,
+    source_caps: dict[str, int],
+) -> list[Article]:
+    patterns = _keyword_patterns(profile)
+    ranked = sorted(
         articles,
-        key=lambda a: (_score(a, keywords), a.published_at or ""),
+        key=lambda a: (_score(a, patterns), a.published_at or ""),
         reverse=True,
     )
+    seen_titles = {normalize_title(t) for t in sent_titles}
     candidates: list[Article] = []
     per_source: dict[str, int] = {}
-    for article in scored:
+    duplicates = 0
+    for article in ranked:
         if len(candidates) >= max_candidates:
             break
-        if per_source.get(article.source, 0) >= MAX_PER_SOURCE:
+        key = normalize_title(article.title)
+        if key in seen_titles:
+            duplicates += 1
             continue
+        if per_source.get(article.source, 0) >= source_caps.get(article.source, max_per_source):
+            continue
+        seen_titles.add(key)
         candidates.append(article)
         per_source[article.source] = per_source.get(article.source, 0) + 1
     log.info(
-        "selection: %d fresh unsent -> %d candidates (per-source cap %d)",
-        len(articles), len(candidates), MAX_PER_SOURCE,
+        "selection: %d fresh unsent -> %d candidates (%d same-story duplicates dropped; per source: %s)",
+        len(articles), len(candidates), duplicates,
+        ", ".join(f"{s} {n}" for s, n in sorted(per_source.items(), key=lambda kv: -kv[1])),
     )
     return candidates

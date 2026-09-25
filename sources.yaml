@@ -16,9 +16,9 @@ rss:
   max_items_per_feed: 15
 
 hackernews:
-  max_stories: 60          # how many top stories to scan
+  lookback_hours: 36       # every story posted in this window (not just today's front page)
   min_score: 80            # minimum HN points
-  keywords:                # keep a story if title matches any whole word (case-insensitive)
+  keywords:                # keep a story if its title contains any of these words (plurals match too)
     - "ai"
     - "llm"
     - "gpt"
@@ -36,7 +36,7 @@ hackernews:
 
 arxiv:
   categories: [cs.AI, cs.CL, cs.LG]
-  max_results: 40
+  max_results: 25          # newest submissions; only the best few reach the model (see source_caps)
 
 # How far back to consider UNSENT articles as candidates. Wider = fuller digests,
 # because with 2 sends/day a short window is mostly already-sent articles and the
@@ -48,5 +48,14 @@ freshness_hours: 72
 # any accidental double while leaving room for GitHub cron jitter. --force overrides.
 min_hours_between_issues: 8
 
-# Maximum candidates passed to the model in one call
+# Maximum candidates passed to the model in one call, and how many may come from
+# any one source. source_caps overrides the default per source name: arXiv adds
+# dozens of papers every run, which used to crowd out the practical sources.
 max_candidates: 30
+max_per_source: 10
+source_caps:
+  arXiv: 3
+
+# Skip the send (and keep the stories for the next run) if an issue would have
+# fewer than this many stories — e.g. quiet weekends. --force overrides.
+min_items: 4

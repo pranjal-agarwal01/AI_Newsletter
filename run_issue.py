@@ -4,11 +4,13 @@
     python run_issue.py --dry-run  # everything except sending, on a copy of the DB; writes out/digest-<date>.html
     python run_issue.py --no-llm   # like --dry-run, but raw excerpts instead of an LLM call
     python run_issue.py --force    # send even if the last issue was recent or this one is thin
+    python run_issue.py --check    # verify the OpenRouter key and email login; sends nothing
 """
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import shutil
 import sys
 from datetime import date
@@ -19,12 +21,34 @@ from newsletter.config import DB_PATH, OUT_DIR, load_profile, load_sources
 from newsletter.enrich import enrich_articles
 from newsletter.ingest import build_adapters
 from newsletter.selection import select_candidates
-from newsletter.summarize import active_model, stub_digest, write_digest
+from newsletter.summarize import active_model, check_key, stub_digest, write_digest
 
 log = logging.getLogger("run_issue")
 
 DEDUP_DAYS = 14      # a story sent within this many days won't be sent again under another URL
 KEEP_TEXT_DAYS = 14  # article body text older than this is dropped to keep the DB small
+
+
+def _fail(message: str) -> int:
+    """Log a run-ending error. On GitHub Actions also emit it as an annotation:
+    annotations show on the run page without signing in, while the logs don't —
+    a bare 'exit code 1' hid a broken Gmail login for two weeks."""
+    log.error(message)
+    if os.getenv("GITHUB_ACTIONS") == "true":
+        escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::error title=Newsletter not sent::{escaped}", flush=True)
+    return 1
+
+
+def check() -> int:
+    """--check: confirm the secrets work before relying on a scheduled run."""
+    try:
+        check_key()
+        deliver.verify()
+    except RuntimeError as exc:
+        return _fail(str(exc))
+    log.info("All credentials OK.")
+    return 0
 
 
 def main() -> int:
@@ -34,6 +58,10 @@ def main() -> int:
     parser.add_argument(
         "--no-llm", action="store_true",
         help="test mode without an LLM call: raw excerpts instead of summaries (implies --dry-run)",
+    )
+    parser.add_argument(
+        "--check", action="store_true",
+        help="only verify the OpenRouter key and email login, then exit (sends nothing)",
     )
     args = parser.parse_args()
     if args.no_llm:
@@ -45,6 +73,9 @@ def main() -> int:
         datefmt="%H:%M:%S",
     )
     logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    if args.check:
+        return check()
 
     sources = load_sources()
     profile = load_profile()
@@ -103,8 +134,7 @@ def main() -> int:
         try:
             digest, usage = write_digest(candidates, profile)
         except RuntimeError as exc:
-            log.error(str(exc))
-            return 1
+            return _fail(str(exc))
 
     if len(digest.items) < min_items:
         log.info("The model picked only %d stories (minimum %d) — skipping; unsent stories carry over.",
@@ -123,7 +153,10 @@ def main() -> int:
         log.info("dry run: wrote %s — subject: %s (no email sent, real DB untouched)", out_path, subject)
         return 0
 
-    deliver.send(subject, html, text)
+    try:
+        deliver.send(subject, html, text)
+    except RuntimeError as exc:
+        return _fail(f"{exc} The selected stories stay unsent and carry over to the next run.")
     issue_id = db.record_issue(
         conn,
         [item.article_id for item in digest.items],
@@ -139,4 +172,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except Exception as exc:
+        _fail(f"Unexpected {type(exc).__name__}: {exc}")
+        raise

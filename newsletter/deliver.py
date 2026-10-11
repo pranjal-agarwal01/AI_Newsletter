@@ -76,12 +76,28 @@ def _gmail_build(sender: str, recipient: str, subject: str, html_body: str, text
     return message
 
 
-def _gmail_send(subject: str, html_body: str, text_body: str, to_list: list[str]) -> tuple[int, list[str]]:
+def _gmail_connect() -> tuple[smtplib.SMTP_SSL, str]:
+    """Logged-in SMTP session. A refused login becomes a RuntimeError that says
+    what to do — Gmail answers a revoked app password by silently dropping the
+    connection (SMTPServerDisconnected), not with a readable auth error."""
     sender = env("GMAIL_ADDRESS")
-    password = env("GMAIL_APP_PASSWORD")
+    smtp = smtplib.SMTP_SSL("smtp.gmail.com", 465, timeout=60)
+    try:
+        smtp.login(sender, env("GMAIL_APP_PASSWORD"))
+    except (smtplib.SMTPAuthenticationError, smtplib.SMTPServerDisconnected) as exc:
+        smtp.close()
+        raise RuntimeError(
+            f"Gmail refused the SMTP login ({type(exc).__name__}: {exc}). Create a new app password "
+            "at https://myaccount.google.com/apppasswords (needs 2-Step Verification), then update "
+            "GMAIL_APP_PASSWORD in .env and in the GitHub repository secrets."
+        ) from exc
+    return smtp, sender
+
+
+def _gmail_send(subject: str, html_body: str, text_body: str, to_list: list[str]) -> tuple[int, list[str]]:
     sent, failed = 0, []
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
-        smtp.login(sender, password)
+    smtp, sender = _gmail_connect()
+    with smtp:
         for recipient in to_list:
             try:
                 smtp.send_message(_gmail_build(sender, recipient, subject, html_body, text_body))
@@ -154,7 +170,23 @@ def _resend_send(subject: str, html_body: str, text_body: str, to_list: list[str
     return sent, failed
 
 
-# --- Public entry point ----------------------------------------------------
+# --- Public entry points ---------------------------------------------------
+
+def verify() -> None:
+    """Checks the delivery credentials without sending anything. Raises
+    RuntimeError if they don't work."""
+    prov = provider()
+    if prov == "resend":
+        # Resend sending keys can't be probed without a send; check they're present.
+        env("RESEND_API_KEY")
+        env("MAIL_FROM")
+        log.info("deliver[resend]: RESEND_API_KEY and MAIL_FROM are set")
+    else:
+        smtp, _ = _gmail_connect()
+        smtp.quit()
+        log.info("deliver[gmail]: SMTP login OK")
+    log.info("deliver[%s]: %d recipient(s) in DIGEST_TO", prov, len(recipients()))
+
 
 def send(subject: str, html_body: str, text_body: str) -> None:
     to_list = recipients()

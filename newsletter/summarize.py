@@ -187,6 +187,21 @@ def _try_model(model: str, messages: list, headers: dict) -> tuple[Digest, dict]
     raise _Unavailable(note)
 
 
+def check_key() -> None:
+    """Confirms OpenRouter accepts OPENROUTER_API_KEY, without a model call."""
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY is not set. Copy .env.example to .env and fill it in.")
+    response = httpx.get(
+        "https://openrouter.ai/api/v1/key", headers={"Authorization": f"Bearer {api_key}"}, timeout=30
+    )
+    if response.status_code != 200:
+        raise RuntimeError(
+            f"OpenRouter rejected the key (HTTP {response.status_code}) — check OPENROUTER_API_KEY."
+        )
+    log.info("openrouter: key OK (model: %s)", active_model())
+
+
 def write_digest(candidates: list[Article], profile: dict) -> tuple[Digest, dict]:
     """Returns (digest, usage) where usage has input/output token counts and the model used."""
     api_key = os.getenv("OPENROUTER_API_KEY")

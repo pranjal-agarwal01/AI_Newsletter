@@ -37,6 +37,7 @@ sources (RSS / HN / arXiv)
 .venv\Scripts\python run_issue.py --dry-run   # full pipeline incl. the LLM, no email; writes out/digest-<date>.html
 .venv\Scripts\python run_issue.py             # sends the email
 .venv\Scripts\python run_issue.py --force     # sends even if the last issue was recent or this one is thin
+.venv\Scripts\python run_issue.py --check     # only verifies the OpenRouter key and email login; sends nothing
 ```
 
 `--dry-run` and `--no-llm` work on a throwaway copy (`out/dry-run.db`), so they never
@@ -68,6 +69,11 @@ One-time setup — add these **repository secrets**
 | `DIGEST_TO` | recipient address |
 
 Test it from the repo's **Actions tab → AI Newsletter → Run workflow**.
+
+When a run fails, the reason is posted as an annotation on the run's summary page
+(visible without opening the logs). The usual cause is a revoked Gmail app password:
+create a new one, confirm it locally with `run_issue.py --check`, then update the
+`GMAIL_APP_PASSWORD` secret.
 
 ### On-time delivery (recommended)
 
